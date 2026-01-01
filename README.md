@@ -1,6 +1,3 @@
-# INT-WFC-transit-pipeline
-End-to-end INT/WFC transit photometry pipeline: calibration, cube building, aperture photometry, ensemble detrending, and BATMAN-based transit modelling.
-
 # INT/WFC Transit Photometry Pipeline (Monolithic)
 
 Single-file, end-to-end pipeline for INT/WFC time-series transit photometry:
