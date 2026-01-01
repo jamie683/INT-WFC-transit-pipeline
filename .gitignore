@@ -205,3 +205,23 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+ Python
+__pycache__/
+*.pyc
+
+# Data products (DO NOT COMMIT)
+outputs/
+photometry_outputs/
+*.fits
+*.fit
+*.fits.fz
+*.csv
+
+# Plots
+*.png
+*.pdf
+
+# OS junk
+.DS_Store
+Thumbs.db
