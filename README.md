@@ -2,7 +2,7 @@
 
 Single-file, end-to-end pipeline for INT/WFC time-series transit photometry:
 
-**header ingestion → calibration (bias / flat / overscan / trim) → data cubes → DS9 regions → aperture photometry → ensemble detrending → transit modelling (BATMAN + MCMC)**
+**header uptake → calibration (bias / flat / overscan / trim) → data cubes → DS9 regions → aperture photometry → ensemble detrending → transit modelling (BATMAN + MCMC)**
 
 This repository intentionally keeps the pipeline as a **single script (`INT_All.py`)** to preserve behaviour, reproducibility, and reduce refactor risk.
 
