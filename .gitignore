@@ -209,6 +209,7 @@ __marimo__/
  Python
 __pycache__/
 *.pyc
+.env
 
 # Data products (DO NOT COMMIT)
 outputs/
@@ -217,6 +218,7 @@ photometry_outputs/
 *.fit
 *.fits.fz
 *.csv
+*.log
 
 # Plots
 *.png
