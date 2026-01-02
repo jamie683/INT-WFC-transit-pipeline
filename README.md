@@ -1,3 +1,5 @@
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.18129809.svg)](https://doi.org/10.5281/zenodo.18129809)
+
 # INT/WFC Transit Photometry Pipeline (Monolithic)
 
 Single-file, end-to-end pipeline for INT/WFC time-series transit photometry:
