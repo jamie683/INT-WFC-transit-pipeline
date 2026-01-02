@@ -4,7 +4,7 @@ Single-file, end-to-end pipeline for INT/WFC time-series transit photometry:
 
 **header uptake → calibration (bias / flat / overscan / trim) → data cubes → DS9 regions → aperture photometry → ensemble detrending → transit modelling (BATMAN + MCMC)**
 
-This repository intentionally keeps the pipeline as a **single script (`INT_All.py`)** to preserve behaviour, reproducibility, and reduce refactor risk.
+This repository intentionally keeps the pipeline as a **single script (`INT_pipeline.py`)** to preserve behaviour, reproducibility, and reduce refactor risk.
 
 ---
 
@@ -23,11 +23,11 @@ pip install numpy scipy astropy photutils matplotlib pandas tqdm emcee corner ba
 ## Repository contents
 
 ```
-INT_All.py            # full pipeline (monolithic by design)
+INT_pipeline.py            # full pipeline (monolithic by design)
 targets.json          # target database (periods, limb darkening, etc.)
 instrument.json       # instrument-level configuration overrides
-outputs/              # calibration products, cubes, manifests
-photometry_outputs/   # photometry CSVs, plots, merged products
+outputs/              # calibration products, cubes, manifests (generated)
+photometry_outputs/   # photometry CSVs, plots, merged products (generated)
 ```
 
 ---
@@ -119,8 +119,8 @@ You will be prompted for:
 ### CLI mode (recommended for reproducibility)
 
 ```bash
-python INT_All.py \
-  --data-dir "C:\\path\\to\\data_root" \
+python INT_pipeline.py \
+  --data-dir /path/to/data_root
   --target TOI_1516_b \
   --band r \
   --night 2023-09-14 \
@@ -155,7 +155,7 @@ The pipeline produces:
 - Written specifically for **INT/WFC**
 - Assumes overscan geometry consistent with WFC CCDs
 - DS9 region files are in IMAGE coordinates (pixel space)
-
+- Comparison-star subsets are ranked using out-of-transit RMS only, to avoid transit-depth bias.
 ---
 
 ## License
