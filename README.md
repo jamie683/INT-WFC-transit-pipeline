@@ -14,7 +14,7 @@ This repository intentionally keeps the pipeline as a **single script (`INT_pipe
 
 Python **3.10+** recommended.
 
-Install dependencies (example):
+Install dependencies:
 
 ```bash
 pip install numpy scipy astropy photutils matplotlib pandas tqdm emcee corner batman-package
@@ -118,7 +118,7 @@ You will be prompted for:
 
 ---
 
-### CLI mode (recommended for reproducibility)
+### CLI mode
 
 ```bash
 python INT_pipeline.py \
