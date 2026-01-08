@@ -25,7 +25,7 @@ pip install numpy scipy astropy photutils matplotlib pandas tqdm emcee corner ba
 ## Repository contents
 
 ```
-INT_pipeline.py            # full pipeline (monolithic by design)
+INT_pipeline.py       # full pipeline (monolithic by design)
 targets.json          # target database (periods, limb darkening, etc.)
 instrument.json       # instrument-level configuration overrides
 outputs/              # calibration products, cubes, manifests (generated)
