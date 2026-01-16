@@ -169,10 +169,10 @@ g_inst = None
 
 
 # --- CONFIG LOADERS ---
-def load_instrument_config(inst_path):
+def load_instrument_config(inst_path, instrument_name="INT_WFC"):
     """
-    Instrument-level parameters (do not depend on target).
-    Defaults are defined here, then optionally overridden by instrument.json.
+    Load instrument parameters. Supports nested instrument.json like:
+    { "INT_WFC": { "hdu_index": ..., "overscan": {...}, "noise": {...}, "photometry": {...} } }
     """
     inst = {
         "hdu_index": 4,
@@ -189,48 +189,65 @@ def load_instrument_config(inst_path):
 
         # Noise / gain
         "gain_e_per_adu": 2.9,
+        "auto_readnoise": True,
+        "read_noise_e": float("nan"),
 
         # Parallelism
         "max_workers": None,
 
-        # Photometry defaults (example placeholders — keep yours)
+        # Photometry defaults
         "start_frame": 0,
+        "min_snr_target": 3.0,
     }
 
-    inst.setdefault("auto_readnoise", True)
-    
-    # Placeholder; will be estimated
-    inst.setdefault("read_noise_e", float("nan"))  
     cfg_path = Path(inst_path)
-    if cfg_path.is_file():
-        try:
-            user_cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-            if not isinstance(user_cfg, dict):
-                raise ValueError("instrument.json must contain a JSON object (dict).")
-    
-            # Overlay only known keys (prevents typos silently doing nothing)
-            unknown = [k for k in user_cfg.keys() if k not in inst]
-            if unknown:
-                print(f"⚠️ instrument.json contains unknown keys (ignored): {unknown}")
-    
-            for k, v in user_cfg.items():
-                if k in inst:
-                    inst[k] = v
-    
-            # Warn for missing important keys (don’t spam everything)
-            IMPORTANT = ["hdu_index", "gain_e_per_adu", "horizontal_overscan", "vertical_overscan"]
-            for k in IMPORTANT:
-                if k not in user_cfg:
-                    print(f"ℹ️ instrument.json missing '{k}', using default: {inst[k]}")
-    
-            print(f"✅ Loaded instrument overrides from {cfg_path.name}")
-    
-        except Exception as e:
-            print(f"⚠️ Failed to read instrument.json ({cfg_path}): {e}")
-    else:
+    if not cfg_path.is_file():
         print("ℹ️ No instrument.json found, using code defaults.")
-    
-    return inst
+        return inst
+
+    try:
+        raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("instrument.json must contain a JSON object (dict).")
+
+        # If file is instrument-keyed (like your current one), select the block:
+        user_cfg = raw.get(instrument_name, raw)
+
+        if not isinstance(user_cfg, dict):
+            raise ValueError(f"instrument.json[{instrument_name}] must be a JSON object (dict).")
+
+        # Map nested schema -> flat keys used by pipeline
+        if "hdu_index" in user_cfg:
+            inst["hdu_index"] = user_cfg["hdu_index"]
+
+        overscan = user_cfg.get("overscan", {})
+        if isinstance(overscan, dict):
+            inst["horizontal_overscan"] = overscan.get("horizontal", inst["horizontal_overscan"])
+            inst["vertical_overscan"]   = overscan.get("vertical", inst["vertical_overscan"])
+            inst["measure_side"]        = overscan.get("measure_side", inst["measure_side"])
+            inst["subtract_overscan"]   = overscan.get("subtract", inst["subtract_overscan"])
+            inst["trim_left"]           = overscan.get("trim_left", inst["trim_left"])
+            inst["trim_right"]          = overscan.get("trim_right", inst["trim_right"])
+            inst["trim_top"]            = overscan.get("trim_top", inst["trim_top"])
+            inst["trim_bottom"]         = overscan.get("trim_bottom", inst["trim_bottom"])
+
+        noise = user_cfg.get("noise", {})
+        if isinstance(noise, dict):
+            inst["gain_e_per_adu"] = noise.get("gain_e_per_adu", inst["gain_e_per_adu"])
+            inst["read_noise_e"]   = noise.get("read_noise_e", inst["read_noise_e"])
+            inst["auto_readnoise"] = noise.get("auto_readnoise", inst["auto_readnoise"])
+
+        phot = user_cfg.get("photometry", {})
+        if isinstance(phot, dict):
+            inst["start_frame"]    = phot.get("start_frame", inst["start_frame"])
+            inst["min_snr_target"] = phot.get("min_snr_target", inst["min_snr_target"])
+
+        print(f"✅ Loaded instrument config '{instrument_name}' from {cfg_path.name}")
+        return inst
+
+    except Exception as e:
+        print(f"⚠️ Failed to read instrument.json ({cfg_path}): {e}")
+        return inst
 
 def load_target_config(path: Path, target_name: str) -> dict:
     cfg = json.loads(path.read_text(encoding="utf-8"))
@@ -2512,11 +2529,6 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
     lo  = np.percentile(chain, 16, axis=0)
     hi  = np.percentile(chain, 84, axis=0)
 
-    '''print("\n[MCMC posteriors] median ±1σ")
-    for lab, m, l, h in zip(labels, med, lo, hi):
-        print(f"{lab:10s}= {m:.6f}  (+{h-m:.6f}/-{m-l:.6f})")
-    print(f"Depth ≈ {100*med[0]**2:.3f}%")
-    print(f"Timing offset ≈ {med[1]*24*60:.2f} min")'''
 
     # 3.) Median model evaluated on your actual x
     rp_m, dt_m, c0_m, c1_m, u1_m, u2_m, _ = med
@@ -2531,7 +2543,6 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
     chi2 = np.sum((resid[valid] / yerr[valid])**2)
     ndof = valid.sum() - len(popt_cf)
     chi2_red = chi2 / ndof
-    '''print(f"Reduced chi^2 for this aperture set: {chi2_red:.4f}")'''
     if grid_only:
         # - OOT RMS metric for aperture optimisation -
     
@@ -2744,7 +2755,7 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
         top_k     = 2
         
         # Random subsets per k
-        max_eval_per_k = 5000               
+        max_eval_per_k = 100000               
 
         # Store (oot_rms, js_tuple, popt)
         top_heap = []   
@@ -3011,29 +3022,54 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
     plt.savefig(outdir / f"analysis_resid_airmass_fwhm_{cube_path.stem}.png", dpi=200)
     plt.close()
         
-    def binned_rms(resid, nbins_list):
-        rms_vals = []
+    def binned_rms(resid, bin_sizes, min_nbins=10):
+        """
+        Compute RMS of binned residuals (std of bin means), only for bin sizes
+        that yield at least `min_nbins` bins.
+        """
+        resid = resid[np.isfinite(resid)]
         n = len(resid)
-        for nb in nbins_list:
-            if nb >= n:
-                rms_vals.append(np.nan)
+    
+        out_bins = []
+        out_rms  = []
+        out_nbins = []
+    
+        for bs in bin_sizes:
+            if bs <= 0 or bs >= n:
                 continue
-            m = n // nb   # number of bins
-            r = resid[:m*nb].reshape(m, nb)
-            bin_means = np.nanmean(r, axis=1)
-            rms_vals.append(np.sqrt(np.nanmean(bin_means**2)))
-        return np.array(rms_vals)
-
-    nbins_list = np.array([1, 2, 4, 8, 16, 32])
-    mask_valid = np.isfinite(resid)
-    rms_vals = binned_rms(resid[mask_valid], nbins_list)
-    mask = np.isfinite(rms_vals) & (rms_vals > 0)
-
+    
+            nbins = n // bs
+            if nbins < min_nbins:
+                continue
+    
+            trimmed = resid[:nbins * bs].reshape(nbins, bs)
+            bin_means = np.nanmean(trimmed, axis=1)
+    
+            # standard choice: scatter of binned means about their mean
+            rms = np.nanstd(bin_means, ddof=1)
+    
+            out_bins.append(bs)
+            out_rms.append(rms)
+            out_nbins.append(nbins)
+    
+        return np.array(out_bins), np.array(out_rms), np.array(out_nbins)
+    
+    
+    # Choose candidate bin sizes (log-ish), but let the function cull large ones
+    candidate_bins = np.array([1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 32])
+    
+    resid_use = resid[np.isfinite(resid)]
+    bin_sizes, rms_vals, nbins_each = binned_rms(resid_use, candidate_bins, min_nbins=10)
+    
+    print("Bin sizes:", bin_sizes)
+    print("Nbins each:", nbins_each)
     print("RMS values:", rms_vals)
     
     plt.figure(figsize=(6,4))
-    plt.loglog(nbins_list, rms_vals, 'o-', label="Data")
-    plt.loglog(nbins_list, rms_vals[0]/np.sqrt(nbins_list), 'k--',
+    plt.loglog(bin_sizes, rms_vals, 'o-', label="Data")
+    
+    # White-noise expectation anchored at the unbinned RMS (standard)
+    plt.loglog(bin_sizes, rms_vals[0] / np.sqrt(bin_sizes), 'k--',
                label=r"White noise $\propto 1/\sqrt{N}$")
     
     plt.xlabel("Bin size (number of points)", fontsize=13)
@@ -3168,3 +3204,5 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
 if __name__ == "__main__":
     args = parse_args()
     run_pipeline(args)
+    
+    
