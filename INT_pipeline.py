@@ -191,6 +191,7 @@ def load_instrument_config(inst_path, instrument_name="INT_WFC"):
         "gain_e_per_adu": 2.9,
         "auto_readnoise": True,
         "read_noise_e": float("nan"),
+        "beta_factor": 1.0,
 
         # Parallelism
         "max_workers": None,
@@ -236,11 +237,14 @@ def load_instrument_config(inst_path, instrument_name="INT_WFC"):
             inst["gain_e_per_adu"] = noise.get("gain_e_per_adu", inst["gain_e_per_adu"])
             inst["read_noise_e"]   = noise.get("read_noise_e", inst["read_noise_e"])
             inst["auto_readnoise"] = noise.get("auto_readnoise", inst["auto_readnoise"])
-
+            inst["beta_factor"]    = float(noise.get("beta_factor", 1.0))
+            
         phot = user_cfg.get("photometry", {})
         if isinstance(phot, dict):
             inst["start_frame"]    = phot.get("start_frame", inst["start_frame"])
             inst["min_snr_target"] = phot.get("min_snr_target", inst["min_snr_target"])
+
+            
 
         print(f"✅ Loaded instrument config '{instrument_name}' from {cfg_path.name}")
         return inst
@@ -1449,9 +1453,9 @@ def optimise_aperture_grid(
     outdir: Path,
     inst: dict,
     targ: dict,
-    r_ap_min: float = 4.0,
-    r_ap_max: float = 13.0,
-    r_ap_step: float = 0.2,
+    r_ap_min: float = 8.0,
+    r_ap_max: float = 25.0,
+    r_ap_step: float = 1.0,
     r_in_scale: float = 1.5,
     r_out_scale: float = 2.5,
 ):
@@ -2135,6 +2139,7 @@ def run_photometry_for_band(data_root: Path, band: str, reg_path: Path, *, inst:
             aper_file,
             cube_path=cube_path,
             reg_path=reg_path,
+            data_root=data_root,
             outdir=outdir,
             inst=inst,
             targ=targ,
@@ -2380,11 +2385,17 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
     # Differential light curve in absolute units (ADU / dimensionless ensemble)
     lc_abs = target_array / ens
     
-    # Error propagation (target noise only, in electrons)
-    lc_err_abs = np.abs(lc_abs) * np.sqrt((np.array(target_noise) / np.array(target_flux_e))**2)
+    beta = float(inst.get("beta_factor", 1.0))
     
-    # Comparison-star error margin (kept from your original logic)
+    lc_err_abs = np.abs(lc_abs) * np.sqrt(
+        (np.array(target_noise) / np.array(target_flux_e))**2
+    )
+    
+    # Comparison-star margin
     lc_err_abs *= 1.2
+    
+    # Time-correlated noise inflation
+    lc_err_abs *= beta
     
     # Normalise light curve
     scale = np.nanmedian(lc_abs)
@@ -2595,13 +2606,7 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
     plt.savefig(outdir / f"lightcurve_phase_mcmc_{cube_path.stem}.png", dpi=200)
     plt.close()
 
-    # 5.) Corner plot
-    chain_subset = chain[:, :3]
-    labels_subset = ["rp", "dt [d]", "c0"]
-    corner.corner(chain_subset, labels=labels_subset, show_titles=True, title_fmt=".4f",
-                  quantiles=[0.16, 0.5, 0.84])
-    plt.savefig(outdir / f"mcmc_corner_subset3_{cube_path.stem}.png", dpi=150)
-    plt.close()
+
 
 
     # -- COMPARISON STAR ANALYSIS --
@@ -2701,6 +2706,7 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
             # Error propagation (target noise only; keep your existing formula)
             lc_err_abs = lc_abs * np.sqrt((noise_eval / tfe_eval) ** 2)
             lc_err_abs *= 1.2  # comparison-star margin
+            lc_err_abs *= beta
         
             # Normalize
             scale = np.nanmedian(lc_abs)
@@ -2876,6 +2882,7 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
 
         lc_err_abs_sub = lc_abs_sub * np.sqrt((tn_sub / tfe_sub)**2)
         lc_err_abs_sub *= 1.2 # Comparison star error margin
+        lc_err_abs_sub *= beta
         
         # Normalise
         scale_sub = np.nanmedian(lc_abs_sub)
@@ -2993,8 +3000,38 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
         plt.close()
         
         
+    # -- Corner plot for BEST comparison-star subset --
+    if subset_mcmc_results:
+        best = min(subset_mcmc_results, key=lambda d: d["oot_rms"])
+    
+        chain_best  = best["chain"]
+        labels_best = best["labels"]   # ["rp","dt [d]","c0","c1","u1","u2","log10_sj"]
+    
+        # Optional: choose subset of parameters for readability
+        use_idx = [0, 1, 2, 3]  # rp, dt, c0, c1 (or keep all 7)
+        chain_plot  = chain_best[:, use_idx]
+        labels_plot = [labels_best[i] for i in use_idx]
+    
+        corner.corner(
+            chain_plot,
+            labels=labels_plot,
+            show_titles=True,
+            title_fmt=".4f",
+            quantiles=[0.16, 0.5, 0.84],
+        )
+    
+        rank = best["rank"]
+        oot  = best["oot_rms"]
+        plt.suptitle(f"Best subset corner (rank={rank}, OOT RMS={oot:.3e})", fontsize=11)
+        plt.tight_layout()
+        plt.savefig(outdir / f"mcmc_corner_best_subset_rank{rank}_{cube_path.stem}.png", dpi=150)
+        plt.close()
+    else:
+        print("⚠️ No subset MCMC results available; skipping best-subset corner plot.")
+
+
     # - EXTRA PLOTS -
-        
+    
     # Residuals vs airmass
     mask = (
     np.isfinite(resid) &
@@ -3063,10 +3100,6 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
     resid_use = resid[np.isfinite(resid)]
     bin_sizes, rms_vals, nbins_each = binned_rms(resid_use, candidate_bins, min_nbins=10)
     
-    print("Bin sizes:", bin_sizes)
-    print("Nbins each:", nbins_each)
-    print("RMS values:", rms_vals)
-    
     plt.figure(figsize=(6,4))
     plt.loglog(bin_sizes, rms_vals, 'o-', label="Data")
     
@@ -3083,7 +3116,22 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
     plt.tight_layout()
     plt.savefig(outdir / f"analysis_rms_bins_{cube_path.stem}.png", dpi=200)
     plt.close()
+
+
+    # --- Beta factor from binned residual RMS (Pont+ style) ---
+    rms1 = float(rms_vals[0])  # unbinned RMS (bin=1)
+    beta_vals = rms_vals / (rms1 / np.sqrt(bin_sizes))
     
+    beta_median_measured = float(np.nanmedian(beta_vals[1:])) if len(beta_vals) > 1 else float("nan")
+    beta_max_measured    = float(np.nanmax(beta_vals[1:]))    if len(beta_vals) > 1 else float("nan")
+
+    beta_used = float(beta)  # this is your config beta (default 1.0)
+    with open(summary_path, "a", encoding="utf-8") as f:
+        f.write("\n--- Noise inflation (beta factor) ---\n")
+        f.write(f"beta_used (config): {beta_used:.3f}\n")
+        f.write(f"beta_measured_median (excl N=1): {beta_median_measured:.3f}\n")
+        f.write(f"beta_measured_max (excl N=1): {beta_max_measured:.3f}\n")
+
     # - Save best-fit system parameters to a text file (for pRT etc.) -
     summary_path = outdir / f"system_fit_summary_{cube_path.stem}.txt"
     
@@ -3091,7 +3139,7 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
         f.write("# BATMAN + MCMC system-fit summary\n")
         f.write(f"# Cube: {cube_path}\n")
         f.write(f"# Band: {band}\n\n")
-    
+
         # - Main fit (using full ensemble) -
         f.write("=== Main ensemble fit (all comparison stars used in build_ensemble) ===\n")
         f.write(f"oot_rms_main = {oot_rms:.5f}\n\n")
