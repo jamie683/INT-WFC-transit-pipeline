@@ -1795,6 +1795,7 @@ def choose_from_list(title, items):
             return items[int(s)-1]
 
 def select_files_from_master(
+    project_root,
     master_csv: Path,
     *,
     obj_override: str | None = None,
@@ -1846,15 +1847,57 @@ def select_files_from_master(
     else:
         night = choose_from_list("Choose NIGHT", nights)
 
-    # - Final selection -
+    # - Final selection -   
     sci = df[(df["OBSTYPE"]=="TARGET") & (df["OBJECT"]==obj) & (df["FILTER"]==filt) & (df["NIGHT"]==night)]
-    flats = df[(df["OBSTYPE"]=="FLAT") & (df["FILTER"]==filt) & (df["NIGHT"]==night)]
-    bias  = df[(df["OBSTYPE"]=="BIAS") & (df["NIGHT"]==night)]
+    
+    # --- Flats ---
+    flats = df[
+        (df["OBSTYPE"] == "FLAT") &
+        (df["FILTER"] == filt)
+    ]
+    
+    # Prefer same-night flats if available
+    flats_same_night = flats[flats["NIGHT"] == night]
+    if len(flats_same_night) > 0:
+        flats = flats_same_night
+    else:
+        print("⚠️ No same-night flats found — using flats from other nights.")
+    
+    # --- Bias ---
+    bias = df[df["OBSTYPE"] == "BIAS"]
+    
+    bias_same_night = bias[bias["NIGHT"] == night]
+    if len(bias_same_night) > 0:
+        bias = bias_same_night
+    else:
+        print("⚠️ No same-night bias found — using bias from other nights.")
+        
 
-    sci_files  = [Path(p) for p in sci["filepath"].tolist()]
-    flat_files = [Path(p) for p in flats["filepath"].tolist()]
+    # --- Final fallback: if header-based flat selection fails, use curated folder ---
+    if len(flats) == 0:
+        flat_dir = project_root / "Flat" / "Flat_G"
+        if not flat_dir.exists():
+            raise SystemExit(f"❌ No flats matched, and curated flat folder not found: {flat_dir}")
+    
+        flat_files = []
+        for pat in ("*.fits", "*.fit", "*.fts", "*.fits.fz", "*.fz"):
+            flat_files += sorted(flat_dir.glob(pat))
+    
+        if len(flat_files) == 0:
+            raise SystemExit(f"❌ Flat directory exists but contains no FITS/FZ files: {flat_dir}")
+    
+        print(f"⚠️ No flats matched by header — using curated flats in {flat_dir} ({len(flat_files)} files).")
+        flats = flat_files  # list of Paths
+    
+    # --- Build file lists ---
+    sci_files = [Path(p) for p in sci["filepath"].tolist()]
+    
+    if isinstance(flats, list):
+        flat_files = [Path(p) for p in flats]
+    else:
+        flat_files = [Path(p) for p in flats["filepath"].tolist()]
+    
     bias_files = [Path(p) for p in bias["filepath"].tolist()]
-
     print("\nSelection summary:")
     print(f"  OBJECT={obj}")
     print(f"  FILTER={filt}")
@@ -2047,7 +2090,7 @@ def run_pipeline(args=None):
     df_master.to_csv(master_csv, index=False)
 
     # 2.) Run selection (CLI overrides optional, otherwise your interactive selection)
-    obj, filt, night, sci_files, flat_files, bias_files = select_files_from_master(
+    obj, filt, night, sci_files, flat_files, bias_files = select_files_from_master(project_root,
         master_csv,
         obj_override=args.target,
         filt_override=args.band,
@@ -2074,6 +2117,7 @@ def run_pipeline(args=None):
 
     # 6.) Photometry + merge per produced band
     for band in sorted(cubes_dict.keys()):
+        band = str(band).strip().lower()
         reg_path = prompt_for_reg_file(project_root, band)
         run_photometry_for_band(project_root, band, reg_path=reg_path, inst=inst, targ=targ)
         merge_photometry_with_headers(project_root, band)
@@ -2174,7 +2218,8 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
         
     if band is None:
         band = cube_path.stem.replace("cube_", "")
-    band = str(band).strip()
+    band = str(band).strip().lower()
+
 
     if inst is None or targ is None:
         raise ValueError("main() requires inst and targ configs.")
@@ -2945,6 +2990,10 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
         lo_sub  = np.percentile(chain_sub, 16, axis=0)
         hi_sub  = np.percentile(chain_sub, 84, axis=0)
 
+        # --- Derived quantities for fit summary (from MCMC posterior) ---
+        rp_m   = float(med_sub[0])
+
+        
         # 6.) Compute model and residuals for plotting
         rp_m, dt_m, c0_m, c1_m, u1_m, u2_m, _ = med_sub
         y_med_sub = batman_flux(
@@ -2953,12 +3002,17 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
         )
         resid_sub = y_sub - y_med_sub
 
+        valid_sub = np.isfinite(resid_sub) & np.isfinite(yerr_sub) & (yerr_sub > 0)
+        chi2_sub = np.sum((resid_sub[valid_sub] / yerr_sub[valid_sub])**2)
+        ndof_sub = valid_sub.sum() - 4   # rp, dt, c0, c1 were fit params effectively
+        chi2_red_sub = chi2_sub / max(1, ndof_sub)
+
         # Store results
         subset_mcmc_results.append({
             "rank": rank,
             "comps": js,
             "oot_rms": oot_rms,
-            "chi2_red": chi2_red,
+            "chi2_red": float(chi2_red_sub),
             "x": x_sub,
             "y": y_sub,
             "yerr": yerr_sub,
@@ -3142,8 +3196,6 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
 
         # - Main fit (using full ensemble) -
         f.write("=== Main ensemble fit (all comparison stars used in build_ensemble) ===\n")
-        f.write(f"oot_rms_main = {oot_rms:.5f}\n\n")
-    
         f.write("Parameters (median +/-1sigma):\n")
         for lab, m, l, h in zip(labels, med, lo, hi):
             plus  = h - m
@@ -3185,15 +3237,42 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
                 minus = m - lo_i
                 f.write(f"  {lab:10s} = {m:.8f}  +{plus:.8f}  -{minus:.8f}\n")
     
-            rp_b     = med_b[0]
-            rp_b_lo  = med_b[0] - lo_b[0]
-            rp_b_hi  = hi_b[0]  - med_b[0]
-            depth_b  = 100.0 * rp_b**2
-    
-            f.write("\nDerived (best subset):\n")
-            f.write(f"  depth_subset_percent = {depth_b:.6f}\n")
-            f.write(f"  rp_subset            = {rp_b:.8f}  +{rp_b_hi:.8f}  -{rp_b_lo:.8f}\n")
-            f.write(f"  dt_subset_minutes    = {med_b[1]*24*60:.4f}\n")
+            f.write("\nDerived (FINAL = best subset):\n")
+        
+            # --- Best-subset posterior summaries ---
+            rp_b   = float(med_b[0])
+            rp_b16 = float(lo_b[0])
+            rp_b84 = float(hi_b[0])
+        
+            dt_b_d   = float(med_b[1])   # days
+            dt_b16_d = float(lo_b[1])
+            dt_b84_d = float(hi_b[1])
+        
+            # Rp/R* uncertainties (asymmetric)
+            rp_b_err_minus = rp_b - rp_b16
+            rp_b_err_plus  = rp_b84 - rp_b
+        
+            # Depth (%) from posterior bounds of rp
+            depth_b_pct   = 100.0 * (rp_b ** 2)
+            depth_b16_pct = 100.0 * (rp_b16 ** 2)
+            depth_b84_pct = 100.0 * (rp_b84 ** 2)
+        
+            depth_b_err_minus = depth_b_pct - depth_b16_pct
+            depth_b_err_plus  = depth_b84_pct - depth_b_pct
+        
+            # T0 offset (min) from posterior bounds of dt
+            t0_b_min   = 1440.0 * dt_b_d
+            t0_b16_min = 1440.0 * dt_b16_d
+            t0_b84_min = 1440.0 * dt_b84_d
+        
+            t0_b_err_minus = t0_b_min - t0_b16_min
+            t0_b_err_plus  = t0_b84_min - t0_b_min
+        
+            # Write final numbers (subset only)
+            f.write(f"  rp_over_rs         = {rp_b:.8f}  +{rp_b_err_plus:.8f}  -{rp_b_err_minus:.8f}\n")
+            f.write(f"  depth_percent      = {depth_b_pct:.6f}  +{depth_b_err_plus:.6f}  -{depth_b_err_minus:.6f}\n")
+            f.write(f"  t0_offset_minutes  = {t0_b_min:.4f}  +{t0_b_err_plus:.4f}  -{t0_b_err_minus:.4f}\n")
+        
         else:
             f.write("No subset MCMC results available (subset_mcmc_results empty).\n")
     
