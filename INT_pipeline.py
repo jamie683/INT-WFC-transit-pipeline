@@ -2596,12 +2596,79 @@ def main(cube_path: Path, reg_path: Path, outdir: Path,
     # 4.) Plot data + model + residuals
     resid = y - y_med  # residuals: data - model
     
-    # Chi-squared metric for this aperture set
-    valid = np.isfinite(resid) & np.isfinite(yerr) & (yerr > 0)
-    chi2 = np.sum((resid[valid] / yerr[valid])**2)
-    ndof = valid.sum() - len(popt_cf)
-    chi2_red = chi2 / ndof
+    
+    # --- Photometric precision metrics (OOT) ---
+    # OOT mask in the *sorted / used* arrays (x, y, resid)
+    if (half_phase_excl is not None) and np.isfinite(half_phase_excl):
+        oot = (np.abs(x) > float(half_phase_excl))
+    else:
+        # fallback
+        oot = (x < -0.02) | (x > 0.02)
+    
+    resid_oot = resid[oot]
+    resid_oot = resid_oot[np.isfinite(resid_oot)]
+    
+    # - σ per exposure (RMS of detrended OOT residuals) -
+    sigma_per_exp = float(np.nanstd(resid_oot, ddof=1)) if resid_oot.size >= 3 else np.nan
+    
+    # Convert to ppt and mmag (small-signal approximation: mmag ≈ 1085.74 * frac)
+    sigma_per_exp_ppt  = 1e3 * sigma_per_exp
+    sigma_per_exp_mmag = 1085.74 * sigma_per_exp
+  
+    # - Final precision (inflate measured scatter by beta) -
+    beta_used = float(inst.get("beta_factor", 1.0))
+    final_precision = beta_used * sigma_per_exp
+    final_precision_ppt = 1e3 * final_precision
+    
+    
+    # - σ_1min -
+    # Estimate cadence from time stamps corresponding to the same (g, order) points used for x/y
+    t_used = t_bjd[g][order]
+    t_used = t_used[np.isfinite(t_used)]
+    dt_sec = np.nanmedian(np.diff(t_used)) * 86400.0 if t_used.size >= 2 else np.nan
+    
+    if np.isfinite(dt_sec) and dt_sec > 0:
+        nbin_1min = int(np.clip(np.round(60.0 / dt_sec), 1, 10**9))
+    else:
+        nbin_1min = None
+    
+    def _binned_scatter_of_means(x, N):
+        """Std of bin means for fixed bin size N (uses full bins only)."""
+        x = np.asarray(x, float)
+        x = x[np.isfinite(x)]
+        if N is None or N < 1:
+            return np.nan
+        n_full = (x.size // N) * N
+        if n_full < 2 * N:
+            return np.nan
+        m = np.nanmean(x[:n_full].reshape(-1, N), axis=1)
+        return float(np.nanstd(m, ddof=1)) if m.size >= 2 else np.nan
+    
+    sigma_1min = _binned_scatter_of_means(resid_oot, nbin_1min)
+    sigma_1min_ppt  = 1e3 * sigma_1min if np.isfinite(sigma_1min) else np.nan
+    sigma_1min_mmag = 1085.74 * sigma_1min if np.isfinite(sigma_1min) else np.nan
+    
+    # Print + append to existing frame-quality file (photdir summary_path)
+    print("\nPhotometric precision (OOT, post-fit residuals):")
+    print(f"  cadence ≈ {dt_sec:.2f} s  (N_1min = {nbin_1min})")
+    print(f"  sigma_per_exp = {sigma_per_exp:.6e}  ({sigma_per_exp_ppt:.3f} ppt, {sigma_per_exp_mmag:.3f} mmag)")
+    print(f"  sigma_1min    = {sigma_1min:.6e}  ({sigma_1min_ppt:.3f} ppt, {sigma_1min_mmag:.3f} mmag)")
+    
+    with open(photdir / "photometry_frame_quality.txt", "a", encoding="utf-8") as f:
+        f.write("\n--- Photometric precision (OOT, post-fit residuals) ---\n")
+        f.write(f"cadence_sec_median = {dt_sec:.6f}\n")
+        f.write(f"Nbin_1min          = {nbin_1min}\n")
+        f.write(f"sigma_per_exp      = {sigma_per_exp:.8e}\n")
+        f.write(f"sigma_per_exp_ppt  = {sigma_per_exp_ppt:.6f}\n")
+        f.write(f"sigma_per_exp_mmag = {sigma_per_exp_mmag:.6f}\n")
+        f.write(f"sigma_1min         = {sigma_1min:.8e}\n")
+        f.write(f"sigma_1min_ppt     = {sigma_1min_ppt:.6f}\n")
+        f.write(f"sigma_1min_mmag    = {sigma_1min_mmag:.6f}\n")
+        f.write(f"final_precision      = {final_precision:.8e}\n")
+        f.write(f"final_precision_ppt  = {final_precision_ppt:.6f}\n")
+
     if grid_only:
+        
         # - OOT RMS metric for aperture optimisation -
     
         # Use SAME phase window as normal
